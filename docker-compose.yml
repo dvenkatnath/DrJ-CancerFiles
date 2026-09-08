@@ -1,0 +1,89 @@
+# DEV / CLIENT ON-PREM compose file: Postgres (with pgvector) + Ollama + the
+# backend API + the frontend, all on one Docker network. This is what a
+# client's on-prem box runs -- PHI never leaves this network, and there is no
+# egress to any cloud LLM: OPENAI_BASE_URL points at the `ollama` service below.
+#
+# For the RAILWAY POC target, don't use this file -- see railway.json /
+# README.md's "Railway PoC" section instead; Railway deploys backend/ and
+# frontend/ as two separate services and Postgres as an add-on.
+#
+# Usage:
+#   cp .env.example .env        # then edit JWT_SECRET at minimum
+#   docker compose up --build
+#   docker compose exec backend python -m seed.seed_data   # first run only
+#
+# Pulling models the first time (into the `ollama_models` volume):
+#   docker compose exec ollama ollama pull qwen3:14b
+#   docker compose exec ollama ollama pull qwen3:8b
+#   docker compose exec ollama ollama pull nomic-embed-text
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-cwuser}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cwpass}
+      POSTGRES_DB: ${POSTGRES_DB:-clinician_dev}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-cwuser}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    volumes:
+      - ollama_models:/root/.ollama
+    ports:
+      - "11434:11434"
+    # GPU acceleration (uncomment on a host with an NVIDIA GPU + nvidia-container-toolkit):
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      ENVIRONMENT: ${ENVIRONMENT:-dev}
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-cwuser}:${POSTGRES_PASSWORD:-cwpass}@postgres:5432/${POSTGRES_DB:-clinician_dev}
+      JWT_SECRET: ${JWT_SECRET:-dev-only-insecure-secret-change-me}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-http://ollama:11434/v1}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-ollama}
+      CHAT_MODEL: ${CHAT_MODEL:-qwen3:14b}
+      EXTRACTION_MODEL: ${EXTRACTION_MODEL:-qwen3:8b}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-nomic-embed-text}
+      EMBEDDING_DIM: ${EMBEDDING_DIM:-768}
+      LLM_MODE: ${LLM_MODE:-auto}
+      CORS_ORIGINS: '["http://localhost:5173","http://localhost:8080"]'
+    volumes:
+      - uploads:/app/data/uploads
+    ports:
+      - "8000:8000"
+
+  frontend:
+    build: ./frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    environment:
+      BACKEND_INTERNAL_URL: http://backend:8000
+    ports:
+      - "8080:80"
+
+volumes:
+  pg_data:
+  ollama_models:
+  uploads:
